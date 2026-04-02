@@ -1,0 +1,57 @@
+[sources.docker_logs]
+type = "docker_logs"
+docker_host = "unix:///var/run/docker.sock"
+include_containers = [
+  "api-gateway",
+  "security",
+  "uploader",
+  "minio"
+]
+
+[transforms.structured_logs]
+type = "remap"
+inputs = ["docker_logs"]
+source = '''
+. = parse_json(.message) ?? .
+.kubernetes = null
+.@timestamp = now()
+'''
+
+[transforms.add_metadata]
+type = "remap"
+inputs = ["structured_logs"]
+source = '''
+.service = .container_name
+.host = .host
+'''
+
+[transforms.nginx_parse]
+type = "remap"
+inputs = ["add_metadata"]
+source = '''
+if .service == "api-gateway" && exists(.message) && !exists(.request) {
+  parsed = parse_regex!(.message, r'^(?P<remote_addr>[^ ]+) - (?P<remote_user>[^ ]+) \[(?P<time_local>[^\]]+)\] "(?P<method>[^ ]+) (?P<request_uri>[^ ]+) HTTP/[^"]+" (?P<status>[0-9]+) (?P<body_bytes_sent>[0-9]+) "(?P<http_referer>[^"]*)" "(?P<http_user_agent>[^"]*)"')
+  if !is_empty(parsed) {
+    . = merge(., parsed)
+    .event_type = "nginx_access"
+    del(.message)
+  }
+}
+'''
+
+[transforms.filter_errors]
+type = "filter"
+inputs = ["nginx_parse"]
+condition = '!(.message == "vector started" || .message == "vector stopped" || .message == "Reloading vector" || exists(.log) && .log == "vector")'
+
+[sinks.elasticsearch]
+type = "elasticsearch"
+inputs = ["filter_errors"]
+endpoints = ["http://elasticsearch:9200"]  # Заменяем endpoint на endpoints
+bulk.index = "logs-%Y-%m-%d"
+
+# Опционально: выводим логи в stdout для отладки
+[sinks.console]
+type = "console"
+inputs = ["filter_errors"]
+encoding.codec = "json"
